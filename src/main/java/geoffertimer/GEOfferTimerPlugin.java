@@ -170,9 +170,16 @@ public class GEOfferTimerPlugin extends Plugin
 
     private void saveTimes()
     {
-        for (Map.Entry<Integer, Instant> entry : offerStartTimes.entrySet())
+        for (int i = 0; i < 8; i++)
         {
-            configManager.setRSProfileConfiguration(CONFIG_GROUP, "slot" + entry.getKey(), entry.getValue().toEpochMilli());
+            if (offerStartTimes.containsKey(i))
+            {
+                configManager.setRSProfileConfiguration(CONFIG_GROUP, "slot" + i, offerStartTimes.get(i).toEpochMilli());
+            }
+            else
+            {
+                configManager.unsetRSProfileConfiguration(CONFIG_GROUP, "slot" + i);
+            }
         }
     }
 
