@@ -32,6 +32,7 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.client.config.ConfigManager;
@@ -71,6 +72,13 @@ public class GEOfferTimerPlugin extends Plugin
     final Map<Integer, String> completedOfferStates = new HashMap<>();
     final Map<Integer, Integer> completedOfferItems = new HashMap<>();
 
+    // Flag to ignore EMPTY events during login/logout transitions.
+    // When logging in, the client fires EMPTY events for all GE slots
+    // before firing the real BUYING/SELLING events. During logout, it
+    // also fires EMPTY for all slots. We need to ignore both cases
+    // to prevent saved timers from being wiped out.
+    private boolean ignoreEmptyEvents = true;
+
     @Override
     protected void startUp() throws Exception
     {
@@ -88,19 +96,36 @@ public class GEOfferTimerPlugin extends Plugin
         completedOfferTimes.clear();
         completedOfferStates.clear();
         completedOfferItems.clear();
+        ignoreEmptyEvents = true;
         log.debug("GE Offer Timer stopped!");
     }
 
     @Subscribe
     public void onGameStateChanged(GameStateChanged event)
     {
-        if (event.getGameState() == GameState.LOGIN_SCREEN)
+        if (event.getGameState() == GameState.LOGIN_SCREEN
+                || event.getGameState() == GameState.HOPPING)
         {
+            // Save times BEFORE the client fires EMPTY events that clear maps
             saveTimes();
+            ignoreEmptyEvents = true;
         }
         if (event.getGameState() == GameState.LOGGED_IN)
         {
+            ignoreEmptyEvents = true;
             loadSavedTimes();
+        }
+    }
+
+    @Subscribe
+    public void onGameTick(GameTick event)
+    {
+        // After the first game tick, the initial GE offer events have
+        // finished firing, so it's safe to process EMPTY events again
+        if (ignoreEmptyEvents)
+        {
+            ignoreEmptyEvents = false;
+            log.debug("Initial login phase complete, now processing EMPTY events");
         }
     }
 
@@ -157,14 +182,17 @@ public class GEOfferTimerPlugin extends Plugin
             }
         }
 
-        // Empty slot - remove everything
+        // Empty slot - remove everything (but only when not during login/logout)
         if (state == GrandExchangeOfferState.EMPTY)
         {
-            offerStartTimes.remove(slot);
-            completedOfferTimes.remove(slot);
-            completedOfferStates.remove(slot);
-            completedOfferItems.remove(slot);
-            saveTimes();
+            if (!ignoreEmptyEvents)
+            {
+                offerStartTimes.remove(slot);
+                completedOfferTimes.remove(slot);
+                completedOfferStates.remove(slot);
+                completedOfferItems.remove(slot);
+                saveTimes();
+            }
         }
     }
 
