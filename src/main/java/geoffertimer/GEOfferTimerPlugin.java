@@ -106,7 +106,6 @@ public class GEOfferTimerPlugin extends Plugin
         if (event.getGameState() == GameState.LOGIN_SCREEN
                 || event.getGameState() == GameState.HOPPING)
         {
-            // Save times BEFORE the client fires EMPTY events that clear maps
             saveTimes();
             ignoreEmptyEvents = true;
         }
@@ -200,6 +199,7 @@ public class GEOfferTimerPlugin extends Plugin
     {
         for (int i = 0; i < 8; i++)
         {
+            // Save active offer start times
             if (offerStartTimes.containsKey(i))
             {
                 configManager.setRSProfileConfiguration(CONFIG_GROUP, "slot" + i, offerStartTimes.get(i).toEpochMilli());
@@ -208,6 +208,20 @@ public class GEOfferTimerPlugin extends Plugin
             {
                 configManager.unsetRSProfileConfiguration(CONFIG_GROUP, "slot" + i);
             }
+
+            // Save completed/cancelled offer data
+            if (completedOfferTimes.containsKey(i))
+            {
+                configManager.setRSProfileConfiguration(CONFIG_GROUP, "completed_time" + i, completedOfferTimes.get(i));
+                configManager.setRSProfileConfiguration(CONFIG_GROUP, "completed_state" + i, completedOfferStates.get(i));
+                configManager.setRSProfileConfiguration(CONFIG_GROUP, "completed_item" + i, completedOfferItems.get(i));
+            }
+            else
+            {
+                configManager.unsetRSProfileConfiguration(CONFIG_GROUP, "completed_time" + i);
+                configManager.unsetRSProfileConfiguration(CONFIG_GROUP, "completed_state" + i);
+                configManager.unsetRSProfileConfiguration(CONFIG_GROUP, "completed_item" + i);
+            }
         }
     }
 
@@ -215,6 +229,7 @@ public class GEOfferTimerPlugin extends Plugin
     {
         for (int i = 0; i < 8; i++)
         {
+            // Load active offer start times
             String saved = configManager.getRSProfileConfiguration(CONFIG_GROUP, "slot" + i);
             if (saved != null)
             {
@@ -226,6 +241,27 @@ public class GEOfferTimerPlugin extends Plugin
                 catch (NumberFormatException e)
                 {
                     log.debug("Failed to parse saved time for slot {}", i);
+                }
+            }
+
+            // Load completed/cancelled offer data
+            String completedTime = configManager.getRSProfileConfiguration(CONFIG_GROUP, "completed_time" + i);
+            String completedState = configManager.getRSProfileConfiguration(CONFIG_GROUP, "completed_state" + i);
+            String completedItem = configManager.getRSProfileConfiguration(CONFIG_GROUP, "completed_item" + i);
+            if (completedTime != null && completedState != null)
+            {
+                try
+                {
+                    completedOfferTimes.put(i, Long.parseLong(completedTime));
+                    completedOfferStates.put(i, completedState);
+                    if (completedItem != null)
+                    {
+                        completedOfferItems.put(i, Integer.parseInt(completedItem));
+                    }
+                }
+                catch (NumberFormatException e)
+                {
+                    log.debug("Failed to parse completed offer data for slot {}", i);
                 }
             }
         }
