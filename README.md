@@ -25,9 +25,13 @@ This plugin is available on the [RuneLite Plugin Hub](https://runelite.net/plugi
 
 ## Links
 
-🎥 [YouTube](https://youtube.com/@SeismicRy) - Algorithmic trading strategies & OSRS content
+For updates and other gaming content, follow me on:
 
-🐦 [X / Twitter](https://x.com/SeismicRy) - Follow for updates
+🎥 [YouTube](https://youtube.com/@SeismicRy)
+
+🐦 [X / Twitter](https://x.com/SeismicRy)
+
+🎵 [TikTok](https://www.tiktok.com/@seismicry)
 
 ## Building
 
