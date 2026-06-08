@@ -124,6 +124,16 @@ public class GEOfferTimerPlugin extends Plugin
         if (ignoreEmptyEvents)
         {
             ignoreEmptyEvents = false;
+
+            // The login/hop EMPTY events were ignored above so they couldn't
+            // wipe a real active timer. The downside is that data restored
+            // from config is never reconciled with reality, so a slot that is
+            // actually empty now (e.g. the offer was collected in a previous
+            // session) would keep showing a stale, inflated timer forever.
+            // Now that the offers have settled, drop anything that doesn't
+            // match the live GE state.
+            reconcileWithLiveOffers();
+
             log.debug("Initial login phase complete, now processing EMPTY events");
         }
     }
@@ -192,6 +202,49 @@ public class GEOfferTimerPlugin extends Plugin
                 completedOfferItems.remove(slot);
                 saveTimes();
             }
+        }
+    }
+
+    /**
+     * Drops tracked timer data for any GE slot that is actually EMPTY in the
+     * live client state. Run once the login/hop EMPTY-event window has passed
+     * so stale data restored from config (active timers, or completed offers
+     * that were already collected) doesn't linger on the overlay. Genuinely
+     * active offers (BUYING/SELLING) and uncollected completed offers
+     * (BOUGHT/SOLD) do not report as EMPTY, so they are left untouched.
+     */
+    private void reconcileWithLiveOffers()
+    {
+        GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
+        if (offers == null)
+        {
+            return;
+        }
+
+        boolean changed = false;
+        for (int slot = 0; slot < offers.length; slot++)
+        {
+            GrandExchangeOffer offer = offers[slot];
+            // Only clear when the client explicitly reports the slot as EMPTY.
+            // A null entry means the state isn't loaded yet, so leave it alone
+            // rather than risk wiping a timer that is still being populated.
+            if (offer == null || offer.getState() != GrandExchangeOfferState.EMPTY)
+            {
+                continue;
+            }
+
+            if (offerStartTimes.remove(slot) != null
+                    || completedOfferTimes.remove(slot) != null)
+            {
+                changed = true;
+            }
+            completedOfferStates.remove(slot);
+            completedOfferItems.remove(slot);
+        }
+
+        if (changed)
+        {
+            saveTimes();
         }
     }
 
