@@ -26,6 +26,7 @@
 package geoffertimer;
 
 import net.runelite.api.Client;
+import net.runelite.api.GameState;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.widgets.ComponentID;
@@ -79,6 +80,12 @@ public class GETimerOverlay extends Overlay
     @Override
     public Dimension render(Graphics2D graphics)
     {
+        // Never draw over the login / loading screen.
+        if (client.getGameState() != GameState.LOGGED_IN)
+        {
+            return null;
+        }
+
         // If the setting is on, only show when the GE window is open.
         if (config.onlyShowAtGE())
         {
