@@ -30,11 +30,11 @@ import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
-import net.runelite.api.events.GrandExchangeOfferChanged;
-import net.runelite.api.events.GameStateChanged;
-import net.runelite.api.events.GameTick;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
+import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
+import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
@@ -54,6 +54,14 @@ import java.util.Map;
 public class GEOfferTimerPlugin extends Plugin
 {
     private static final String CONFIG_GROUP = "geoffertimer";
+    private static final int SLOTS = 8;
+
+    // After (re)login or a world hop the client replays a burst of GE offer
+    // events to sync each slot. During that burst the offer array is not yet
+    // trustworthy, so we wait this many game ticks (~0.6s each) before reading
+    // it. This is also long enough for the per-account "RS profile" config to
+    // be resolved, which is what makes saved timers reload after a full restart.
+    private static final int LOGIN_GRACE_TICKS = 3;
 
     @Inject
     private OverlayManager overlayManager;
@@ -67,23 +75,27 @@ public class GEOfferTimerPlugin extends Plugin
     @Inject
     private Client client;
 
+    // Active offers: slot -> when the timer started, and the item it is for.
     final Map<Integer, Instant> offerStartTimes = new HashMap<>();
+    private final Map<Integer, Integer> offerItemIds = new HashMap<>();
+
+    // Completed/cancelled offers waiting to be collected: frozen elapsed time,
+    // a label ("BOUGHT" / "SOLD" / "CANCELLED") and the item id, per slot.
     final Map<Integer, Long> completedOfferTimes = new HashMap<>();
     final Map<Integer, String> completedOfferStates = new HashMap<>();
     final Map<Integer, Integer> completedOfferItems = new HashMap<>();
 
-    // Flag to ignore EMPTY events during login/logout transitions.
-    // When logging in, the client fires EMPTY events for all GE slots
-    // before firing the real BUYING/SELLING events. During logout, it
-    // also fires EMPTY for all slots. We need to ignore both cases
-    // to prevent saved timers from being wiped out.
-    private boolean ignoreEmptyEvents = true;
+    private int ticksSinceLogin = 0;
+    private boolean restored = false;
 
     @Override
     protected void startUp() throws Exception
     {
         overlayManager.add(overlay);
-        loadSavedTimes();
+        // Do not load here: at start-up we are on the login screen, where the
+        // RS profile is not resolved yet and config reads return nothing.
+        // The first reconcile after login (see onGameTick) restores instead.
+        resetSessionState();
         log.debug("GE Offer Timer started!");
     }
 
@@ -93,39 +105,62 @@ public class GEOfferTimerPlugin extends Plugin
         overlayManager.remove(overlay);
         saveTimes();
         offerStartTimes.clear();
+        offerItemIds.clear();
         completedOfferTimes.clear();
         completedOfferStates.clear();
         completedOfferItems.clear();
-        ignoreEmptyEvents = true;
+        resetSessionState();
         log.debug("GE Offer Timer stopped!");
+    }
+
+    private void resetSessionState()
+    {
+        ticksSinceLogin = 0;
+        restored = false;
     }
 
     @Subscribe
     public void onGameStateChanged(GameStateChanged event)
     {
-        if (event.getGameState() == GameState.LOGIN_SCREEN
-                || event.getGameState() == GameState.HOPPING)
+        GameState state = event.getGameState();
+        if (state == GameState.LOGGED_IN)
         {
-            saveTimes();
-            ignoreEmptyEvents = true;
+            // Fresh login or the end of a world hop: re-arm the grace window so
+            // we re-validate against this world's offers before touching state.
+            resetSessionState();
         }
-        if (event.getGameState() == GameState.LOGGED_IN)
+        else if (state == GameState.LOGIN_SCREEN || state == GameState.HOPPING)
         {
-            ignoreEmptyEvents = true;
-            loadSavedTimes();
+            // Best-effort persist on the way out. In-play reconciles already
+            // saved every change, so this is just belt-and-suspenders.
+            saveTimes();
         }
     }
 
     @Subscribe
     public void onGameTick(GameTick event)
     {
-        // After the first game tick, the initial GE offer events have
-        // finished firing, so it's safe to process EMPTY events again
-        if (ignoreEmptyEvents)
+        if (client.getGameState() != GameState.LOGGED_IN)
         {
-            ignoreEmptyEvents = false;
-            log.debug("Initial login phase complete, now processing EMPTY events");
+            return;
         }
+
+        // Let the login/hop offer burst settle (and the RS profile resolve)
+        // before we trust the offer array.
+        if (ticksSinceLogin < LOGIN_GRACE_TICKS)
+        {
+            ticksSinceLogin++;
+            return;
+        }
+
+        if (!restored)
+        {
+            loadSavedTimes();
+            restored = true;
+            log.debug("Login grace elapsed; restored saved GE timers");
+        }
+
+        reconcileAll();
     }
 
     @Subscribe
@@ -133,83 +168,193 @@ public class GEOfferTimerPlugin extends Plugin
     {
         log.debug("GE offer changed - slot: {} state: {}", event.getSlot(), event.getOffer().getState());
 
-        int slot = event.getSlot();
-        GrandExchangeOffer offer = event.getOffer();
-        GrandExchangeOfferState state = offer.getState();
-
-        // New active offer - start timer
-        if (state == GrandExchangeOfferState.BUYING || state == GrandExchangeOfferState.SELLING)
+        // Ignore the login/hop sync burst entirely; onGameTick restores and
+        // reconciles once the grace window has elapsed. After that, handle the
+        // single changed slot immediately so the overlay reacts without waiting
+        // for the next tick.
+        if (client.getGameState() != GameState.LOGGED_IN || !restored)
         {
-            if (!offerStartTimes.containsKey(slot))
-            {
-                offerStartTimes.put(slot, Instant.now());
-                completedOfferTimes.remove(slot);
-                completedOfferStates.remove(slot);
-                completedOfferItems.remove(slot);
-                saveTimes();
-            }
+            return;
         }
 
-        // Offer completed - freeze timer
-        if (state == GrandExchangeOfferState.BOUGHT || state == GrandExchangeOfferState.SOLD)
+        if (reconcileSlot(event.getSlot(), client.getGrandExchangeOffers()))
         {
-            Instant startTime = offerStartTimes.get(slot);
-            if (startTime != null)
-            {
-                long elapsed = Instant.now().toEpochMilli() - startTime.toEpochMilli();
-                completedOfferTimes.put(slot, elapsed);
-                completedOfferStates.put(slot, state == GrandExchangeOfferState.BOUGHT ? "BOUGHT" : "SOLD");
-                completedOfferItems.put(slot, offer.getItemId());
-                offerStartTimes.remove(slot);
-                saveTimes();
-            }
+            saveTimes();
+        }
+    }
+
+    /**
+     * Brings every slot's remembered state in line with what the game actually
+     * reports right now. This is the single source of truth: it starts timers
+     * for new offers, freezes completed ones, and drops anything for a slot the
+     * game says is empty (which also clears collected offers and stale ghosts).
+     */
+    private void reconcileAll()
+    {
+        GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
+        if (offers == null)
+        {
+            return;
         }
 
-        // Cancelled - freeze timer with cancelled label
-        if (state == GrandExchangeOfferState.CANCELLED_BUY
-                || state == GrandExchangeOfferState.CANCELLED_SELL)
+        boolean changed = false;
+        for (int slot = 0; slot < offers.length && slot < SLOTS; slot++)
         {
-            Instant startTime = offerStartTimes.get(slot);
-            if (startTime != null)
-            {
-                long elapsed = Instant.now().toEpochMilli() - startTime.toEpochMilli();
-                completedOfferTimes.put(slot, elapsed);
-                completedOfferStates.put(slot, "CANCELLED");
-                completedOfferItems.put(slot, offer.getItemId());
-                offerStartTimes.remove(slot);
-                saveTimes();
-            }
+            changed |= reconcileSlot(slot, offers);
         }
 
-        // Empty slot - remove everything (but only when not during login/logout)
-        if (state == GrandExchangeOfferState.EMPTY)
+        if (changed)
         {
-            if (!ignoreEmptyEvents)
-            {
-                offerStartTimes.remove(slot);
-                completedOfferTimes.remove(slot);
-                completedOfferStates.remove(slot);
-                completedOfferItems.remove(slot);
-                saveTimes();
-            }
+            saveTimes();
         }
+    }
+
+    /**
+     * Reconciles a single slot against its live offer. Returns true if anything
+     * we remember for that slot changed (so the caller can persist).
+     */
+    private boolean reconcileSlot(int slot, GrandExchangeOffer[] offers)
+    {
+        if (offers == null || slot < 0 || slot >= offers.length)
+        {
+            return false;
+        }
+
+        GrandExchangeOffer offer = offers[slot];
+        GrandExchangeOfferState state = offer == null ? GrandExchangeOfferState.EMPTY : offer.getState();
+        int itemId = offer == null ? 0 : offer.getItemId();
+        boolean changed = false;
+
+        switch (state)
+        {
+            case BUYING:
+            case SELLING:
+            {
+                // Active: ensure a running timer and drop any stale completed row.
+                if (completedOfferTimes.remove(slot) != null)
+                {
+                    completedOfferStates.remove(slot);
+                    completedOfferItems.remove(slot);
+                    changed = true;
+                }
+
+                if (!offerStartTimes.containsKey(slot))
+                {
+                    // A newly placed offer (or one we are seeing for the first
+                    // time this session) — start counting now.
+                    offerStartTimes.put(slot, Instant.now());
+                    offerItemIds.put(slot, itemId);
+                    changed = true;
+                }
+                else
+                {
+                    Integer knownItem = offerItemIds.get(slot);
+                    if (knownItem == null)
+                    {
+                        // Restored from older saved data that had no item id —
+                        // adopt it without resetting the timer.
+                        offerItemIds.put(slot, itemId);
+                        changed = true;
+                    }
+                    else if (knownItem != itemId)
+                    {
+                        // A different offer now occupies this slot, so the saved
+                        // start time belongs to a finished offer — restart.
+                        offerStartTimes.put(slot, Instant.now());
+                        offerItemIds.put(slot, itemId);
+                        changed = true;
+                    }
+                }
+                break;
+            }
+
+            case BOUGHT:
+            case SOLD:
+            case CANCELLED_BUY:
+            case CANCELLED_SELL:
+            {
+                // Completed: freeze the timer once, if we were tracking it.
+                Instant start = offerStartTimes.get(slot);
+                if (start != null)
+                {
+                    long elapsed = Instant.now().toEpochMilli() - start.toEpochMilli();
+                    completedOfferTimes.put(slot, elapsed);
+                    completedOfferStates.put(slot, completedLabel(state));
+                    completedOfferItems.put(slot, itemId);
+                    offerStartTimes.remove(slot);
+                    offerItemIds.remove(slot);
+                    changed = true;
+                }
+                // Otherwise it is either already frozen (kept across login via
+                // loadSavedTimes) or one we never timed — leave it untouched.
+                break;
+            }
+
+            case EMPTY:
+            {
+                // The slot is genuinely empty (collected, cancelled-and-collected
+                // or never used) — forget everything we held for it.
+                if (offerStartTimes.remove(slot) != null)
+                {
+                    offerItemIds.remove(slot);
+                    changed = true;
+                }
+                if (completedOfferTimes.remove(slot) != null)
+                {
+                    completedOfferStates.remove(slot);
+                    completedOfferItems.remove(slot);
+                    changed = true;
+                }
+                break;
+            }
+
+            default:
+                // Unknown/transitional state — do not touch remembered data.
+                break;
+        }
+
+        return changed;
+    }
+
+    private static String completedLabel(GrandExchangeOfferState state)
+    {
+        if (state == GrandExchangeOfferState.BOUGHT)
+        {
+            return "BOUGHT";
+        }
+        if (state == GrandExchangeOfferState.SOLD)
+        {
+            return "SOLD";
+        }
+        return "CANCELLED";
     }
 
     private void saveTimes()
     {
-        for (int i = 0; i < 8; i++)
+        for (int i = 0; i < SLOTS; i++)
         {
-            // Save active offer start times
+            // Active offer start time + item id (item id lets us detect a slot
+            // being reused by a different offer across sessions).
             if (offerStartTimes.containsKey(i))
             {
                 configManager.setRSProfileConfiguration(CONFIG_GROUP, "slot" + i, offerStartTimes.get(i).toEpochMilli());
+                Integer item = offerItemIds.get(i);
+                if (item != null)
+                {
+                    configManager.setRSProfileConfiguration(CONFIG_GROUP, "slot_item" + i, item);
+                }
+                else
+                {
+                    configManager.unsetRSProfileConfiguration(CONFIG_GROUP, "slot_item" + i);
+                }
             }
             else
             {
                 configManager.unsetRSProfileConfiguration(CONFIG_GROUP, "slot" + i);
+                configManager.unsetRSProfileConfiguration(CONFIG_GROUP, "slot_item" + i);
             }
 
-            // Save completed/cancelled offer data
+            // Completed/cancelled offer data.
             if (completedOfferTimes.containsKey(i))
             {
                 configManager.setRSProfileConfiguration(CONFIG_GROUP, "completed_time" + i, completedOfferTimes.get(i));
@@ -227,16 +372,20 @@ public class GEOfferTimerPlugin extends Plugin
 
     private void loadSavedTimes()
     {
-        for (int i = 0; i < 8; i++)
+        for (int i = 0; i < SLOTS; i++)
         {
-            // Load active offer start times
+            // Active offer start time + item id.
             String saved = configManager.getRSProfileConfiguration(CONFIG_GROUP, "slot" + i);
             if (saved != null)
             {
                 try
                 {
-                    long epochMilli = Long.parseLong(saved);
-                    offerStartTimes.put(i, Instant.ofEpochMilli(epochMilli));
+                    offerStartTimes.put(i, Instant.ofEpochMilli(Long.parseLong(saved)));
+                    String item = configManager.getRSProfileConfiguration(CONFIG_GROUP, "slot_item" + i);
+                    if (item != null)
+                    {
+                        offerItemIds.put(i, Integer.parseInt(item));
+                    }
                 }
                 catch (NumberFormatException e)
                 {
@@ -244,7 +393,7 @@ public class GEOfferTimerPlugin extends Plugin
                 }
             }
 
-            // Load completed/cancelled offer data
+            // Completed/cancelled offer data.
             String completedTime = configManager.getRSProfileConfiguration(CONFIG_GROUP, "completed_time" + i);
             String completedState = configManager.getRSProfileConfiguration(CONFIG_GROUP, "completed_state" + i);
             String completedItem = configManager.getRSProfileConfiguration(CONFIG_GROUP, "completed_item" + i);

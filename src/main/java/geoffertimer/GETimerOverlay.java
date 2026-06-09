@@ -26,6 +26,7 @@
 package geoffertimer;
 
 import net.runelite.api.Client;
+import net.runelite.api.GameState;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.widgets.ComponentID;
@@ -76,6 +77,12 @@ public class GETimerOverlay extends Overlay
     @Override
     public Dimension render(Graphics2D graphics)
     {
+        // Never draw over the login/loading screen
+        if (client.getGameState() != GameState.LOGGED_IN)
+        {
+            return null;
+        }
+
         // If setting is on, only show when GE is open
         if (config.onlyShowAtGE())
         {
@@ -105,37 +112,47 @@ public class GETimerOverlay extends Overlay
                 .build());
 
         // Active offers
+        GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
         for (Map.Entry<Integer, Instant> entry : offerStartTimes.entrySet())
         {
             int slot = entry.getKey();
+            GrandExchangeOffer offer = (offers != null && slot >= 0 && slot < offers.length) ? offers[slot] : null;
+
+            // Only draw a row while the slot really holds an active offer. The
+            // plugin reconciles state every tick, so anything else here is just
+            // a transient mid-sync value and would render as a ghost.
+            if (offer == null
+                    || (offer.getState() != GrandExchangeOfferState.BUYING
+                    && offer.getState() != GrandExchangeOfferState.SELLING))
+            {
+                continue;
+            }
+
             Duration duration = Duration.between(entry.getValue(), Instant.now());
             String timeString = formatDuration(duration.toMillis());
 
-            GrandExchangeOffer offer = client.getGrandExchangeOffers()[slot];
-            String itemName = "Slot " + (slot + 1);
-            String typeLabel = "?";
-            Color color = Color.WHITE;
+            boolean isBuying = offer.getState() == GrandExchangeOfferState.BUYING;
+            String typeLabel = isBuying ? "BUY" : "SELL";
 
-            if (offer != null && offer.getItemId() != 0)
+            String itemName = "Slot " + (slot + 1);
+            if (offer.getItemId() != 0)
             {
                 itemName = itemManager.getItemComposition(offer.getItemId()).getName();
-                boolean isBuying = offer.getState() == GrandExchangeOfferState.BUYING;
-                typeLabel = isBuying ? "BUY" : "SELL";
-
-                int filled = offer.getQuantitySold();
-                int total = offer.getTotalQuantity();
-
-                if (isBuying)
-                {
-                    color = filled == 0 ? BUY_UNFILLED : BUY_PARTIAL;
-                }
-                else
-                {
-                    color = filled == 0 ? SELL_UNFILLED : SELL_PARTIAL;
-                }
-
-                itemName = itemName + " (" + filled + "/" + total + ")";
             }
+
+            int filled = offer.getQuantitySold();
+            int total = offer.getTotalQuantity();
+            Color color;
+            if (isBuying)
+            {
+                color = filled == 0 ? BUY_UNFILLED : BUY_PARTIAL;
+            }
+            else
+            {
+                color = filled == 0 ? SELL_UNFILLED : SELL_PARTIAL;
+            }
+
+            itemName = itemName + " (" + filled + "/" + total + ")";
 
             panelComponent.getChildren().add(LineComponent.builder()
                     .left(typeLabel + "  " + itemName)
