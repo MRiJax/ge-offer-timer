@@ -8,6 +8,10 @@ A RuneLite plugin that displays how long each Grand Exchange offer has been acti
 - 📊 **Fill Progress** — Displays how much of each offer has been filled
 - 🟢🔴 **Buy/Sell Status** — Clearly indicates whether each offer is a buy or sell
 
+## Screenshots
+
+[![GE Offer Timer overlay tracking Grand Exchange offers — buy/sell status, elapsed time and fill progress, plus completed SOLD and CANCELLED lines](/MRiJax/ge-offer-timer/raw/main/offers.png)](/MRiJax/ge-offer-timer/blob/main/offers.png)
+
 ## Installation
 
 This plugin is available on the [RuneLite Plugin Hub](https://runelite.net/plugin-hub).
