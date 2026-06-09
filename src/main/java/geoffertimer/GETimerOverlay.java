@@ -26,6 +26,7 @@
 package geoffertimer;
 
 import net.runelite.api.Client;
+import net.runelite.api.GameState;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.widgets.ComponentID;
@@ -44,10 +45,13 @@ import java.awt.Dimension;
 import java.awt.Graphics2D;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
 
 public class GETimerOverlay extends Overlay
 {
+    private static final int GE_SLOTS = 8;
+
     private final GEOfferTimerPlugin plugin;
     private final Client client;
     private final ItemManager itemManager;
@@ -76,7 +80,13 @@ public class GETimerOverlay extends Overlay
     @Override
     public Dimension render(Graphics2D graphics)
     {
-        // If setting is on, only show when GE is open
+        // Never draw over the login / loading screen.
+        if (client.getGameState() != GameState.LOGGED_IN)
+        {
+            return null;
+        }
+
+        // If the setting is on, only show when the GE window is open.
         if (config.onlyShowAtGE())
         {
             Widget geWidget = client.getWidget(ComponentID.GRAND_EXCHANGE_WINDOW_CONTAINER);
@@ -86,12 +96,84 @@ public class GETimerOverlay extends Overlay
             }
         }
 
-        Map<Integer, Instant> offerStartTimes = plugin.offerStartTimes;
-        Map<Integer, Long> completedOfferTimes = plugin.completedOfferTimes;
-        Map<Integer, String> completedOfferStates = plugin.completedOfferStates;
-        Map<Integer, Integer> completedOfferItems = plugin.completedOfferItems;
+        GrandExchangeOffer[] liveOffers = client.getGrandExchangeOffers();
 
-        if (offerStartTimes.isEmpty() && completedOfferTimes.isEmpty())
+        List<LineComponent> activeLines = new ArrayList<>();
+        List<LineComponent> completedLines = new ArrayList<>();
+
+        for (int slot = 0; slot < GE_SLOTS; slot++)
+        {
+            GrandExchangeOffer offer = (liveOffers != null && slot < liveOffers.length) ? liveOffers[slot] : null;
+
+            // The live offer is the source of truth for whether a slot still has
+            // anything in it. If it's empty (collected, or just not synced yet
+            // after a login/hop) we skip it, so stale tracked data can never
+            // render as a "? Slot N" or already-collected ghost line.
+            if (offer == null || offer.getItemId() == 0 || offer.getState() == GrandExchangeOfferState.EMPTY)
+            {
+                continue;
+            }
+
+            GrandExchangeOfferState state = offer.getState();
+
+            // Active offer
+            Instant start = plugin.offerStartTimes.get(slot);
+            if (start != null
+                    && (state == GrandExchangeOfferState.BUYING || state == GrandExchangeOfferState.SELLING))
+            {
+                boolean isBuying = state == GrandExchangeOfferState.BUYING;
+                int filled = offer.getQuantitySold();
+                int total = offer.getTotalQuantity();
+                Color color = isBuying
+                        ? (filled == 0 ? BUY_UNFILLED : BUY_PARTIAL)
+                        : (filled == 0 ? SELL_UNFILLED : SELL_PARTIAL);
+
+                String name = itemManager.getItemComposition(offer.getItemId()).getName();
+                String time = formatDuration(Duration.between(start, Instant.now()).toMillis());
+
+                activeLines.add(LineComponent.builder()
+                        .left((isBuying ? "BUY" : "SELL") + "  " + name + " (" + filled + "/" + total + ")")
+                        .leftColor(color)
+                        .right(time)
+                        .rightColor(color)
+                        .build());
+                continue;
+            }
+
+            // Completed / cancelled offer
+            Long completed = plugin.completedOfferTimes.get(slot);
+            if (completed != null)
+            {
+                String stateLabel = plugin.completedOfferStates.getOrDefault(slot, "DONE");
+
+                Integer itemId = plugin.completedOfferItems.get(slot);
+                int resolvedItem = (itemId != null && itemId != 0) ? itemId : offer.getItemId();
+                String name = itemManager.getItemComposition(resolvedItem).getName();
+
+                Color labelColor;
+                if (stateLabel.equals("BOUGHT"))
+                {
+                    labelColor = BUY_COMPLETE;
+                }
+                else if (stateLabel.equals("SOLD"))
+                {
+                    labelColor = SELL_COMPLETE;
+                }
+                else
+                {
+                    labelColor = CANCELLED_COLOR;
+                }
+
+                completedLines.add(LineComponent.builder()
+                        .left(stateLabel + "  " + name)
+                        .leftColor(labelColor)
+                        .right(formatDuration(completed) + " ✓")
+                        .rightColor(Color.WHITE)
+                        .build());
+            }
+        }
+
+        if (activeLines.isEmpty() && completedLines.isEmpty())
         {
             return null;
         }
@@ -104,90 +186,17 @@ public class GETimerOverlay extends Overlay
                 .color(Color.WHITE)
                 .build());
 
-        // Active offers
-        for (Map.Entry<Integer, Instant> entry : offerStartTimes.entrySet())
-        {
-            int slot = entry.getKey();
-            Duration duration = Duration.between(entry.getValue(), Instant.now());
-            String timeString = formatDuration(duration.toMillis());
+        panelComponent.getChildren().addAll(activeLines);
 
-            GrandExchangeOffer offer = client.getGrandExchangeOffers()[slot];
-            String itemName = "Slot " + (slot + 1);
-            String typeLabel = "?";
-            Color color = Color.WHITE;
-
-            if (offer != null && offer.getItemId() != 0)
-            {
-                itemName = itemManager.getItemComposition(offer.getItemId()).getName();
-                boolean isBuying = offer.getState() == GrandExchangeOfferState.BUYING;
-                typeLabel = isBuying ? "BUY" : "SELL";
-
-                int filled = offer.getQuantitySold();
-                int total = offer.getTotalQuantity();
-
-                if (isBuying)
-                {
-                    color = filled == 0 ? BUY_UNFILLED : BUY_PARTIAL;
-                }
-                else
-                {
-                    color = filled == 0 ? SELL_UNFILLED : SELL_PARTIAL;
-                }
-
-                itemName = itemName + " (" + filled + "/" + total + ")";
-            }
-
-            panelComponent.getChildren().add(LineComponent.builder()
-                    .left(typeLabel + "  " + itemName)
-                    .leftColor(color)
-                    .right(timeString)
-                    .rightColor(color)
-                    .build());
-        }
-
-        // Space between active and completed
-        if (!offerStartTimes.isEmpty() && !completedOfferTimes.isEmpty())
+        // Blank spacer between the active and completed sections.
+        if (!activeLines.isEmpty() && !completedLines.isEmpty())
         {
             panelComponent.getChildren().add(LineComponent.builder()
                     .left("")
                     .build());
         }
 
-        // Completed offers
-        for (Map.Entry<Integer, Long> entry : completedOfferTimes.entrySet())
-        {
-            int slot = entry.getKey();
-            String timeString = formatDuration(entry.getValue());
-            String state = completedOfferStates.getOrDefault(slot, "DONE");
-            String itemName = "Slot " + (slot + 1);
-
-            Integer itemId = completedOfferItems.get(slot);
-            if (itemId != null && itemId != 0)
-            {
-                itemName = itemManager.getItemComposition(itemId).getName();
-            }
-
-            Color labelColor;
-            if (state.equals("BOUGHT"))
-            {
-                labelColor = BUY_COMPLETE;
-            }
-            else if (state.equals("SOLD"))
-            {
-                labelColor = SELL_COMPLETE;
-            }
-            else
-            {
-                labelColor = CANCELLED_COLOR;
-            }
-
-            panelComponent.getChildren().add(LineComponent.builder()
-                    .left(state + "  " + itemName)
-                    .leftColor(labelColor)
-                    .right(timeString + " ✓")
-                    .rightColor(Color.WHITE)
-                    .build());
-        }
+        panelComponent.getChildren().addAll(completedLines);
 
         return panelComponent.render(graphics);
     }
